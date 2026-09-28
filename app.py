@@ -1,29 +1,31 @@
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
+import yt_dlp
+import tempfile
+import os
+import re
+
+app = Flask(__name__)
+CORS(app)
+
+@app.get("/")
+def home():
+    return jsonify({
+        "status": "online",
+        "service": "YouTube Downloader API"
+    })
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"})
+
 @app.post("/download")
 def download():
-    raw_body = request.get_data(as_text=True)
-
     data = request.get_json(silent=True) or {}
     url = data.get("url", "").strip()
 
-    # Fallback: extract YouTube URL directly from raw request
     if not url:
-        match = re.search(
-            r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[^\s"\'{}]+',
-            raw_body
-        )
-        if match:
-            url = match.group(0)
-
-    if not url:
-        return jsonify({
-            "error": "YouTube URL is required",
-            "received_body": raw_body
-        }), 400
-
-    if not is_youtube_url(url):
-        return jsonify({
-            "error": "Please provide a valid YouTube URL"
-        }), 400
+        return jsonify({"error": "YouTube URL is required"}), 400
 
     temp_dir = tempfile.mkdtemp()
 
@@ -50,9 +52,7 @@ def download():
                 files = os.listdir(temp_dir)
 
                 if not files:
-                    return jsonify({
-                        "error": "Download failed"
-                    }), 500
+                    return jsonify({"error": "Download failed"}), 500
 
                 filename = os.path.join(temp_dir, files[0])
 
@@ -74,3 +74,7 @@ def download():
             "error": "Unable to download this video",
             "details": str(e)
         }), 500
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
