@@ -4,7 +4,7 @@ import yt_dlp
 import tempfile
 import os
 import re
-import json
+import glob
 
 app = Flask(__name__)
 CORS(app)
@@ -19,8 +19,11 @@ YOUTUBE_DOMAINS = (
 
 
 def is_youtube_url(url):
-    url = url.lower().strip()
-    return any(domain in url for domain in YOUTUBE_DOMAINS)
+    try:
+        url_lower = url.lower()
+        return any(domain in url_lower for domain in YOUTUBE_DOMAINS)
+    except Exception:
+        return False
 
 
 @app.get("/")
@@ -40,81 +43,63 @@ def health():
 
 @app.post("/download")
 def download():
+    data = request.get_json(silent=True)
 
-    # Read the raw request body
-    raw_body = request.get_data(as_text=True)
-
-    url = ""
-
-    # Try JSON parsing
-    try:
-        data = json.loads(raw_body)
-
-        if isinstance(data, dict):
-            url = str(data.get("url", "")).strip()
-
-    except Exception:
-        pass
-
-    # Try Flask JSON parser
-    if not url:
-
-        try:
-            data = request.get_json(silent=True)
-
-            if isinstance(data, dict):
-                url = str(data.get("url", "")).strip()
-
-        except Exception:
-            pass
-
-    # Try extracting a YouTube URL directly from the body
-    if not url:
-
-        match = re.search(
-            r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[^\s"\'<>]+',
-            raw_body
-        )
-
-        if match:
-            url = match.group(0)
-
-    # URL missing
-    if not url:
-
+    if not isinstance(data, dict):
         return jsonify({
-            "error": "YouTube URL is required",
-            "received_body": raw_body,
-            "received_content_type": request.content_type
+            "error": "Request body must be JSON"
         }), 400
 
-    # Validate YouTube URL
-    if not is_youtube_url(url):
+    url = str(data.get("url", "")).strip()
 
+    if not url:
+        return jsonify({
+            "error": "YouTube URL is required"
+        }), 400
+
+    if not is_youtube_url(url):
         return jsonify({
             "error": "Please provide a valid YouTube URL"
         }), 400
 
-    # Temporary directory
-    temp_dir = tempfile.mkdtemp()
+    temp_dir = tempfile.mkdtemp(prefix="youtube_")
 
     output_template = os.path.join(
         temp_dir,
         "%(title).100s.%(ext)s"
     )
 
-    # yt-dlp settings
     options = {
-        "format": "best",
+        # Best available video + audio.
+        # If separate streams are unavailable,
+        # fall back to the best single file.
+        "format": "bv*+ba/b",
+
+        # Merge separate video/audio into MP4.
+        "merge_output_format": "mp4",
+
         "outtmpl": output_template,
+
         "noplaylist": True,
+
         "quiet": True,
-        "no_warnings": False,
+        "no_warnings": True,
+
         "restrictfilenames": True,
+
+        # Helps yt-dlp choose downloadable formats.
+        "check_formats": True,
+
+        # Don't download subtitles, thumbnails, etc.
+        "writesubtitles": False,
+        "writeautomaticsub": False,
+        "writethumbnail": False,
+
+        # Use ffmpeg installed on Render.
+        "postprocessors": [],
     }
 
     try:
-
         with yt_dlp.YoutubeDL(options) as ydl:
 
             info = ydl.extract_info(
@@ -122,53 +107,73 @@ def download():
                 download=True
             )
 
-            filename = ydl.prepare_filename(info)
-
-            # If the expected filename doesn't exist,
-            # find the downloaded file
-            if not os.path.exists(filename):
-
-                files = os.listdir(temp_dir)
-
-                if not files:
-
-                    return jsonify({
-                        "error": "Download failed",
-                        "details": "yt-dlp did not create a file"
-                    }), 500
-
-                filename = os.path.join(
-                    temp_dir,
-                    files[0]
-                )
+            title = info.get("title", "video")
 
             safe_title = re.sub(
                 r'[\\/*?:"<>|]',
                 "",
-                info.get("title", "video")
-            )
+                title
+            ).strip()
 
-            # Determine the actual extension
+            if not safe_title:
+                safe_title = "video"
+
+            # Find downloaded files.
+            files = []
+
+            for path in glob.glob(
+                os.path.join(temp_dir, "*")
+            ):
+                if os.path.isfile(path):
+                    files.append(path)
+
+            if not files:
+                return jsonify({
+                    "error": "Download completed but no file was created"
+                }), 500
+
+            # Prefer MP4.
+            mp4_files = [
+                f for f in files
+                if f.lower().endswith(".mp4")
+            ]
+
+            if mp4_files:
+                filename = mp4_files[0]
+            else:
+                filename = files[0]
+
             extension = os.path.splitext(filename)[1].lower()
 
-            # Send the downloaded file
+            # If yt-dlp produced a non-mp4 file,
+            # send it with its real extension.
+            download_name = safe_title + extension
+
             return send_file(
                 filename,
                 as_attachment=True,
-                download_name=f"{safe_title}{extension}",
+                download_name=download_name,
                 mimetype="video/mp4"
+                if extension == ".mp4"
+                else "application/octet-stream"
             )
+
+    except yt_dlp.utils.DownloadError as e:
+
+        return jsonify({
+            "error": "Unable to download this YouTube video",
+            "details": str(e)
+        }), 500
 
     except Exception as e:
 
         return jsonify({
-            "error": "Unable to download this video",
+            "error": "Server error",
             "details": str(e)
         }), 500
 
 
 if __name__ == "__main__":
-
     port = int(
         os.environ.get("PORT", 10000)
     )
