@@ -1,68 +1,23 @@
-from flask import Flask, request, jsonify, send_file
-from flask_cors import CORS
-import yt_dlp
-import tempfile
-import os
-import re
-import json
-
-app = Flask(__name__)
-CORS(app)
-
-YOUTUBE_DOMAINS = (
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "youtu.be",
-    "www.youtu.be",
-)
-
-
-def is_youtube_url(url):
-    return any(domain in url.lower() for domain in YOUTUBE_DOMAINS)
-
-
-@app.get("/")
-def home():
-    return jsonify({
-        "status": "online",
-        "service": "YouTube Downloader API"
-    })
-
-
-@app.get("/health")
-def health():
-    return jsonify({"status": "ok"})
-
-
 @app.post("/download")
 def download():
-    # Try JSON first
-    data = request.get_json(silent=True)
+    raw_body = request.get_data(as_text=True)
 
-    # Fallback: manually read raw request body
-    if not data:
-        try:
-            raw_body = request.get_data(as_text=True)
+    data = request.get_json(silent=True) or {}
+    url = data.get("url", "").strip()
 
-            if raw_body:
-                data = json.loads(raw_body)
-        except Exception:
-            data = None
-
-    # Fallback: form data
-    if not data:
-        data = request.form.to_dict()
-
-    data = data or {}
-
-    url = str(data.get("url", "")).strip()
+    # Fallback: extract YouTube URL directly from raw request
+    if not url:
+        match = re.search(
+            r'https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/)[^\s"\'{}]+',
+            raw_body
+        )
+        if match:
+            url = match.group(0)
 
     if not url:
         return jsonify({
             "error": "YouTube URL is required",
-            "received_content_type": request.content_type,
-            "received_body": request.get_data(as_text=True)
+            "received_body": raw_body
         }), 400
 
     if not is_youtube_url(url):
@@ -119,11 +74,3 @@ def download():
             "error": "Unable to download this video",
             "details": str(e)
         }), 500
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(
-        host="0.0.0.0",
-        port=port
-    )
